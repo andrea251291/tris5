@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Space5</title>
+  <style>
+    html,body{margin:0;padding:0;background:#000;overflow:hidden;touch-action:manipulation;-webkit-user-select:none;user-select:none;height:100%;}
+    #gameCanvas{display:block;margin:0 auto;background:#000;}
+    .arrow{position:fixed;top:50%;transform:translateY(-50%);font-size:52px;font-family:Arial,Helvetica,sans-serif;color:var(--cyber);text-shadow:0 0 6px var(--cyber);opacity:0.45;pointer-events:none;user-select:none;}
+    .arrow.left{left:12px;}
+    .arrow.right{right:12px;}
+
+    :root{--cyber:#0f0;}           /* neon‑green globale */
+    body{color:var(--cyber);font-family:"Share Tech Mono",Consolas,monospace;text-shadow:0 0 6px var(--cyber);}  
+
+    /* overlay schermata iniziale */
+    .overlay{position:fixed;inset:0;background:#000c;display:flex;align-items:center;justify-content:center;z-index:10;}
+    .panel{background:#111;padding:24px 32px;border-radius:12px;display:flex;flex-direction:column;gap:14px;}
+    .panel label{color:var(--cyber);text-shadow:0 0 6px var(--cyber);}  
+    .panel input{padding:6px 10px;border:1px solid #555;font-size:16px;color:var(--cyber);border:1px solid var(--cyber);background:#000;}
+    .panel button{padding:8px 14px;border:none;border-radius:6px;color:var(--cyber);border:1px solid var(--cyber);background:#000;font-size:16px;cursor:pointer;}
+
+    /* === WELCOME overlay === */
+    .welcome-panel{position:relative;max-width:600px;background:#000;border:2px solid #0f0;padding:32px 40px;font-family:'Share Tech Mono',Consolas,monospace;color:#0f0;text-shadow:0 0 6px #0f0; max-height:90vh; overflow-y:auto; box-sizing:border-box;}
+    .close-btn{position:absolute;top:10px;right:14px;background:none;border:none;font-size:28px;line-height:28px;color:#0f0;cursor:pointer;}
+    .welcome-text{white-space:pre-wrap;margin:0; font-size:clamp(14px, 2.8vw, 22px); line-height:1.35;}
+    #welcomeScreen{z-index:9999;}  
+
+    @keyframes glow{0%,100%{text-shadow:0 0 4px var(--cyber);}50%{text-shadow:0 0 2px var(--cyber),0 0 12px var(--cyber);} }
+    body{animation:glow 2.8s infinite alternate;}
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div class="arrow left">❮</div>
+  <div class="arrow right">❯</div>
+
+  <!-- WELCOME overlay -->
+  <div id="welcomeScreen" class="overlay">
+    <div class="welcome-panel">
+      <button id="closeWelcome" class="close-btn">✖</button>
+      <pre class="welcome-text">
+Un gioco. Nessuna guida.
+5 livelli da affrontare.
+5 posti nella classifica globale.
+Solo chi osserva bene, chi sperimenta, chi scopre… potrà ottenere il punteggio più alto.
+
+Alcune azioni specifiche nascondono un power up, altre power down.
+Ogni livello nasconde un segreto.
+
+Chi riesce a completare il gioco… riceverà qualcosa che gli altri non vedranno mai.
+
+Sarai tu a svelare tutte le hidden mechanics?
+      </pre>
+    </div>
+  </div>
+
+  <div id="introScreen" class="overlay">
+    <div class="panel">
+      <label for="playerNameInput">Inserisci il tuo nome:</label>
+      <input id="playerNameInput" type="text" maxlength="12" autocomplete="off" />
+      <button id="startBtn">Start!</button>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    const canvas=document.getElementById('gameCanvas');
+    const ctx=canvas.getContext('2d');
+
+    /* ====== WELCOME refs ====== */
+    const welcomeOverlay=document.getElementById('welcomeScreen');
+    const closeWelcome  =document.getElementById('closeWelcome');
+    closeWelcome.addEventListener('click',()=>{welcomeOverlay.style.display='none';introOverlay.style.display='flex';});
+
+    /* ====== INTRO refs ====== */
+    const introOverlay=document.getElementById('introScreen');
+    const nameInp=document.getElementById('playerNameInput');
+    const startBtn=document.getElementById('startBtn');
+
+    let playerName='';
+    let introShown=true;
+
+    startBtn.addEventListener('click',()=>{
+      playerName=(nameInp.value||'Sarchiaponissimo').trim();
+      introOverlay.style.display='none';
+      introShown=false;
+      intro();
+    });
+
+    /* === CONFIG === */
+    const ROWS=4, COLS=6;
+    const BASE_SIZE=34, BASE_PADDING=28;
+    const BOTTOM_MARGIN=64;
+    const SHOT_DELAY=280;
+    const MAX_PLAYER_BULLETS=3;
+    const ALIEN_SHOT_PROB=0.01;
+    const MAX_LEVEL=5;
+
+    /* === BOSS CONFIG (solo livello 5) === */
+    const BOSS_W=120;
+    const BOSS_H=60;
+    const BOSS_HITS_REQUIRED=10;
+    const BOSS_SHOT_PROB=0.02;   // spara molto più spesso
+
+    /* === STATE === */
+    let level=1, score=0;
+    let gameRunning=false, gameOver=false, showingMessage=false;
+
+    let bottomRowCleared=false;
+    let firstClearedColIndex=null;
+    let consecutiveTriangleHits=0;
+    let consecutiveSquareHits=0;
+
+    // ===== BOSS STATE =====
+    let boss=null;              // diventa un oggetto quando creato
+    let bossBullets=[];
+
+    /* === ENTITIES === */
+    const player={w:42,h:24,x:0,y:0,color:'lime',speed:()=>Math.max(6,canvas.width*0.025)};
+    const bullets=[];
+    const aliens=[];
+    const alienBullets=[];
+
+    /* === ALIEN PARAMS === */
+    let alienSize=BASE_SIZE, alienPadding=BASE_PADDING;
+    let baseStepX=1.2, alienStepX=baseStepX, alienDir=1;
+    const alienStepDown=16;
+
+    /* === UTILITIES === */
+    const randShape=()=>['rect','circle','triangle'][Math.floor(Math.random()*3)];
+    const calcBaseSpeed=()=>{let s=Math.max(1.2,canvas.width*0.002);if(canvas.width<1200)s*=0.75;return s;};
+
+    /* === RESIZE === */
+    function resize(){
+      canvas.width=window.innerWidth;
+      canvas.height=window.innerHeight;
+      const full=COLS*BASE_SIZE+(COLS-1)*BASE_PADDING;
+      if(full>canvas.width*0.9){const k=(canvas.width*0.9)/full;alienSize=Math.max(16,BASE_SIZE*k);alienPadding=BASE_PADDING*k;}else{alienSize=BASE_SIZE;alienPadding=BASE_PADDING;}
+      baseStepX=calcBaseSpeed();setLevelSpeed();
+      player.x=(canvas.width-player.w)/2;
+      player.y=canvas.height-player.h-BOTTOM_MARGIN;
+      alienBullets.length=0;
+      boss=null;bossBullets.length=0;  // reset boss in caso di resize
+      createAliens();
+    }
+    window.addEventListener('resize',resize);
+
+    /* === CREATE ALIENS === */
+    function createAliens(){
+      aliens.length=0;
+      const startX=(canvas.width-(COLS*alienSize+(COLS-1)*alienPadding))/2;
+      for(let r=0;r<ROWS;r++){
+        for(let c=0;c<COLS;c++){
+          aliens.push({
+            x:startX+c*(alienSize+alienPadding),
+            y:80+r*(alienSize+alienPadding),
+            row:r,
+            col:c,
+            size:alienSize,
+            shape: level===2
+                    ? (c<COLS/2?'triangle':'rect')
+                    : randShape(),
+            color: level===3 ? 'red' : level===4 ? 'purple' : (Math.random()<0.5?'red':'purple')
+          });
+        }
+      }
+      alienDir=1;
+      bottomRowCleared=false;
+      firstClearedColIndex=null;
+      consecutiveSquareHits=0;
+    }
+
+    /* === BOSS CREATION === */
+    function createBoss(){
+      boss={
+        x:(canvas.width-BOSS_W)/2,
+        y:60,
+        w:BOSS_W,
+        h:BOSS_H,
+        color:'#0f0',
+        hits:0,
+        dir:1
+      };
+      bossBullets.length=0;
+    }
+
+    /* === DRAW HELPERS === */
+    function multiline(text,x,y,lh,font){ctx.font=font;ctx.fillStyle='#0f0';ctx.textAlign='center';ctx.textBaseline='middle';text.split('\n').forEach((l,i)=>ctx.fillText(l,x,y+i*lh));}
+    function center(text,fs){const lh=fs*1.2;multiline(text,canvas.width/2,canvas.height/2-(text.split('\n').length-1)*fs*0.6,lh,`${fs}px sans-serif`);}    
+    function hud(){ctx.save();ctx.font='16px sans-serif';ctx.fillStyle='#0f0';ctx.textBaseline='top';const y=56;ctx.textAlign='left';ctx.fillText(`L${level}`,8,y);ctx.textAlign='right';ctx.fillText(`Score ${score}`,canvas.width-8,y);ctx.restore();ctx.textAlign='center';ctx.fillText(playerName,canvas.width/2,y);}  
+    const drawPlayer=()=>{ctx.fillStyle=player.color;ctx.fillRect(player.x,player.y,player.w,player.h);}    
+    const drawBullets=()=>{ctx.fillStyle='#fff';bullets.forEach(b=>ctx.fillRect(b.x,b.y,b.w,b.h));}
+    const drawAliens=()=>{aliens.forEach(a=>{ctx.fillStyle=a.color;switch(a.shape){case'rect':ctx.fillRect(a.x,a.y,a.size,a.size);break;case'circle':ctx.beginPath();ctx.arc(a.x+a.size/2,a.y+a.size/2,a.size/2,0,Math.PI*2);ctx.fill();break;default:ctx.beginPath();ctx.moveTo(a.x+a.size/2,a.y);ctx.lineTo(a.x,a.y+a.size);ctx.lineTo(a.x+a.size,a.y+a.size);ctx.closePath();ctx.fill();}});}    
+
+    /* === DRAW & UPDATE BOSS === */
+    function drawBoss(){if(!boss)return;ctx.fillStyle=boss.color;ctx.fillRect(boss.x,boss.y,boss.w,boss.h);}
+    function updateBoss(){
+      if(!boss)return;
+      boss.x+=baseStepX*2*boss.dir;   // più veloce dei normali alieni
+      if(boss.x<=0||boss.x+boss.w>=canvas.width)boss.dir*=-1;
+    }
+
+    /* === MESSAGES === */
+    let spinner=null;const spinFrames=['/','-','\\','|'];
+    function message(msg,cb,dur=3000,spin=false){
+      gameRunning=false;showingMessage=true;clearInterval(spinner);
+      let f=0;const draw=()=>{ctx.clearRect(0,0,canvas.width,canvas.height);center(spin?`${msg}\nLoading ${spinFrames[f++%4]}`:msg,36);hud();};
+      draw();if(spin)spinner=setInterval(draw,150);
+      setTimeout(()=>{clearInterval(spinner);showingMessage=false;cb&&cb();},dur);
+    }
+
+    /* === GAME FLOW === */
+	/* === RESET GAME (riparte dal livello 1) === */
+function resetGame() {
+  // azzera punteggio e progressi
+  level = 1;
+  score = 0;
+
+  // svuota entità e proiettili
+  bullets.length = 0;
+  alienBullets.length = 0;
+  bossBullets.length = 0;
+  boss = null;
+
+  // ripristina flag
+  gameOver = false;
+  gameRunning = false;
+  showingMessage = false;
+
+  // ricrea alieni e velocità di primo livello
+  setLevelSpeed();
+  createAliens();
+
+  // mostra di nuovo la schermata “Tap to Start”
+  intro();
+}
+
+    function setLevelSpeed(){alienStepX=baseStepX*(1+0.3*(level-1));}
+    function nextLevel(){bullets.length=0;createAliens();gameRunning=true;loop();}
+    function levelCleared(){
+      message(`Level ${level} completed`,()=>{
+        level++;
+        if(level>MAX_LEVEL){finish(true);return;}
+        setLevelSpeed();
+        nextLevel();
+      },3000,true);
+    }
+    function finish(win){
+      gameRunning=false;gameOver=true;
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      center(win?`Game completed!\nComplimenti!\n\nFai tap per la classifica`:'You lose',32);
+      hud();
+      if(win){
+        const redirect=()=>{window.location.href=`classifica.html?name=${encodeURIComponent(playerName)}&score=${score}`;};
+        canvas.addEventListener('pointerdown',redirect,{once:true});
+      } else {
+    // ⬇️ nuovo: un solo tap per resettare e ripartire
+    const restart = () => { resetGame(); };
+    canvas.addEventListener('pointerdown', restart, { once: true });
+  }
+    }
+
+    /* === INPUT === */
+    let holding=false,dir=0,lastShot=0;
+    const zone=x=>{const n=canvas.width*0.2,l=(canvas.width-n)/2,r=l+n;return x<l?-1:x>r?1:0;};
+    function pDown(e){
+      if(introShown||gameOver||showingMessage)return;
+      if(!gameRunning){start();holding=false;dir=0;e.preventDefault();return;}
+      dir=zone(e.clientX);holding=true;shoot();e.preventDefault();
+    }
+    function pMove(e){if(holding&&!introShown&&!showingMessage){dir=zone(e.clientX);e.preventDefault();}}
+    function pUp(){holding=false;dir=0;}
+    window.addEventListener('pointerdown',pDown,{passive:false});
+    window.addEventListener('pointermove',pMove,{passive:false});
+    ['pointerup','pointercancel','pointerleave'].forEach(ev=>window.addEventListener(ev,pUp));
+
+    /* === COLLISIONS & UPDATES === */
+    const rect=(b,a)=>b.x<a.x+a.w&&b.x+b.w>a.x&&b.y<a.y+a.h&&b.y+b.h>a.y;
+
+    function hitCheck(){ // solo contro alieni o boss
+      if(boss){ // player collide con boss
+        if(rect({x:player.x,y:player.y,w:player.w,h:player.h},boss)){finish(false);} }
+      else {
+        aliens.some(a=>rect({x:player.x,y:player.y,w:player.w,h:player.h},{x:a.x,y:a.y,w:a.size,h:a.size}))&&finish(false);
+      }
+    }
+
+    function scoreAlien(a){score+=level+(a.color==='red'?1:2);}    
+
+    function bulletAlienCollisions(){
+      for(let i=bullets.length-1;i>=0;i--){
+        for(let j=aliens.length-1;j>=0;j--){
+          if(rect(bullets[i],{x:aliens[j].x,y:aliens[j].y,w:aliens[j].size,h:aliens[j].size})){
+            const hitAlien=aliens[j];
+            const row=hitAlien.row;
+            const col=hitAlien.col;
+            scoreAlien(hitAlien);
+            bullets.splice(i,1);
+            aliens.splice(j,1);
+
+            // bottom‑row cleared
+            if(!bottomRowCleared&&row===ROWS-1&&aliens.every(al=>al.row!==ROWS-1)){
+              bottomRowCleared=true;aliens.forEach(al=>al.color='purple');alienStepX*=1.4;}
+
+            // first‑column cleared
+            if(firstClearedColIndex===null&&aliens.every(al=>al.col!==col)){
+              firstClearedColIndex=col;
+              if(col===0||col===COLS-1){aliens.forEach(al=>al.color='red');alienStepX*=0.7;}
+            }
+
+            // bonus triangoli
+            if(hitAlien.shape==='triangle'){consecutiveTriangleHits++;if(consecutiveTriangleHits===2){score+=6;consecutiveTriangleHits=0;}}
+            else{consecutiveTriangleHits=0;}
+            // bonus quadrati
+            if(hitAlien.shape==='rect'){
+              consecutiveSquareHits++;if(consecutiveSquareHits===2){for(let n=0;n<2;n++){alienBullets.push({x:hitAlien.x+hitAlien.size/2-3,y:hitAlien.y+hitAlien.size,w:6,h:14,speed:8});}consecutiveSquareHits=0;}}
+            else{consecutiveSquareHits=0;}
+            break;
+          }
+        }
+      }
+    }
+
+    /* === BULLET vs BOSS === */
+    function bulletBossCollision(){
+      if(!boss)return;
+      for(let i=bullets.length-1;i>=0;i--){
+        if(rect(bullets[i],boss)){
+          bullets.splice(i,1);
+          boss.hits++;
+          if(boss.hits>=BOSS_HITS_REQUIRED){
+            score+=100;
+            boss=null;bossBullets.length=0;
+            finish(true);
+            return;
+          }
+        }
+      }
+    }
+
+    function updateBullets(){for(let i=bullets.length-1;i>=0;i--){bullets[i].y-=bullets[i].speed;if(bullets[i].y+bullets[i].h<0)bullets.splice(i,1);}}
+    function updateAliens(){aliens.forEach(a=>a.x+=alienStepX*alienDir);let min=Infinity,max=-Infinity;aliens.forEach(a=>{min=Math.min(min,a.x);max=Math.max(max,a.x+a.size);});if(min<=0||max>=canvas.width){alienDir*=-1;aliens.forEach(a=>{a.y+=alienStepDown;a.x=Math.max(0,Math.min(a.x,canvas.width-a.size));});}}
+
+    /* === ALIEN SHOOTING (solo lvl 5) === */
+    function maybeAlienShoot(){
+      if(level!==5||aliens.length===0)return;
+      if(Math.random()<ALIEN_SHOT_PROB){const a=aliens[Math.floor(Math.random()*aliens.length)];alienBullets.push({x:a.x+a.size/2-3,y:a.y+a.size,w:6,h:14,speed:8});}}
+
+    function updateAlienBullets(){for(let i=alienBullets.length-1;i>=0;i--){alienBullets[i].y+=alienBullets[i].speed;if(alienBullets[i].y>canvas.height)alienBullets.splice(i,1);}}
+    function drawAlienBullets(){ctx.fillStyle='orange';alienBullets.forEach(b=>ctx.fillRect(b.x,b.y,b.w,b.h));}
+    function alienBulletPlayerCollision(){for(let i=0;i<alienBullets.length;i++){const b=alienBullets[i];if(rect(b,{x:player.x,y:player.y,w:player.w,h:player.h})){finish(false);break;}}}
+
+    /* === BOSS SHOOTING === */
+    function maybeBossShoot(){
+      if(!boss)return;
+      if(Math.random()<BOSS_SHOT_PROB){bossBullets.push({x:boss.x+boss.w/2-3,y:boss.y+boss.h,w:6,h:14,speed:10});}}
+    function updateBossBullets(){for(let i=bossBullets.length-1;i>=0;i--){bossBullets[i].y+=bossBullets[i].speed;if(bossBullets[i].y>canvas.height)bossBullets.splice(i,1);}}
+    function drawBossBullets(){ctx.fillStyle='orange';bossBullets.forEach(b=>ctx.fillRect(b.x,b.y,b.w,b.h));}
+    function bossBulletPlayerCollision(){for(let i=0;i<bossBullets.length;i++){const b=bossBullets[i];if(rect(b,{x:player.x,y:player.y,w:player.w,h:player.h})){finish(false);break;}}}
+
+    /* === SHOOT === */
+    function shoot(){const now=performance.now();if(now-lastShot<SHOT_DELAY)return;if(bullets.length>=MAX_PLAYER_BULLETS)return;bullets.push({x:player.x+player.w/2-3,y:player.y-14,w:6,h:14,speed:15});lastShot=now;}
+
+    /* === MAIN LOOP === */
+    function loop(){if(!gameRunning)return;ctx.clearRect(0,0,canvas.width,canvas.height);
+      if(holding){dir===-1?player.x=Math.max(0,player.x-player.speed()):dir===1&&(player.x=Math.min(canvas.width-player.w,player.x+player.speed()));if(performance.now()-lastShot>SHOT_DELAY){shoot();}}
+
+      updateBullets();updateAliens();updateAlienBullets();updateBoss();updateBossBullets();
+      maybeAlienShoot();maybeBossShoot();
+
+      bulletAlienCollisions();bulletBossCollision();
+      alienBulletPlayerCollision();bossBulletPlayerCollision();
+      hitCheck();
+      drawBullets();drawAlienBullets();drawBossBullets();drawAliens();drawBoss();drawPlayer();hud();
+
+      // === controllo fine alieni (e eventuale boss) ===
+      if(!boss && aliens.length===0){
+        if(level===5 && score>=590){createBoss();}
+        else {gameRunning=false;levelCleared();return;}
+      }
+
+      requestAnimationFrame(loop);
+    }
+
+    /* === START & INTRO === */
+    function start(){if(!gameRunning&&!gameOver&&!showingMessage){gameRunning=true;loop();}}
+    function intro(){ctx.clearRect(0,0,canvas.width,canvas.height);center('Tap to Start',36);hud();if(!gameRunning&&!gameOver)requestAnimationFrame(intro);} 
+
+    /* === INIT === */
+    resize();intro();
+  })();
+  </script>
+</body>
+</html>
